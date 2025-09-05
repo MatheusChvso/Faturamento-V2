@@ -1,147 +1,299 @@
-import pandas as pd
 import pymongo
+import pandas as pd
+from fpdf import FPDF
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import os
-import glob
-import re
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 import pytz
 
-# --- CONFIGURAÇÕES ---
-# Conexão com o MongoDB
+# --- CONFIGURAÇÕES GLOBAIS ---
 MONGO_URI = "mongodb://localhost:27017/"
 DB_NAME = "faturamento_db"
 COLLECTION_NAME = "notas_fiscais"
-FUSO_HORARIO = pytz.timezone('America/Sao_Paulo')   
-# Caminhos das pastas (relativos à localização do script)
-INPUT_FOLDER = 'input'
-PROCESSED_FOLDER = 'processed'
+OUTPUT_FOLDER = 'output'
+FILIAIS_ORDEM = ["Juiz de Fora", "Vale Aço", "Rio de Janeiro"]
+FUSO_HORARIO = pytz.timezone('America/Sao_Paulo')
 
-# Regra de negócio para fusão de filiais
-MAPA_FILIAIS = {
-    'SS': {'codigo': 'JF', 'nome': 'Juiz de Fora'},
-    'SZM': {'codigo': 'JF', 'nome': 'Juiz de Fora'},
-    'JF': {'codigo': 'JF', 'nome': 'Juiz de Fora'},
-    'VA': {'codigo': 'VA', 'nome': 'Vale Aço'},
-    'RJ': {'codigo': 'RJ', 'nome': 'Rio de Janeiro'},
-}
+# Paleta de Cores
+COR_PRINCIPAL = (0, 63, 92)      # #003f5c em RGB
+COR_SECUNDARIA = (47, 79, 79)    # #2f4f4f em RGB
+COR_FUNDO_LINHA = (240, 240, 240) # Cinza claro para linhas de tabela
+# Expandindo as cores para mais linhas no gráfico de evolução por filial
+CORES_GRAFICOS_EVOLUCAO = ["#003f5c", "#ff6361", "#ffa600", "#7a5195", "#bc5090", "#ef5675"] # Adicionadas mais cores
 
-# --- FUNÇÕES ---
+# --- FUNÇÕES DE BANCO DE DADOS E GRÁFICOS ---
 
-def get_db_connection(uri, db_name):
-    """Estabelece a conexão com o MongoDB e retorna o objeto do banco."""
+def get_data_from_mongo():
     try:
-        client = pymongo.MongoClient(uri)
-        client.admin.command('ping')  # Verifica se a conexão foi bem-sucedida
-        print("Conexão com MongoDB estabelecida com sucesso.")
-        return client[db_name]
-    except pymongo.errors.ConnectionFailure as e:
-        print(f"Não foi possível conectar ao MongoDB: {e}")
+        client = pymongo.MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+        df = pd.DataFrame(list(collection.find()))
+        if df.empty:
+            print("A coleção no MongoDB está vazia. Nenhum dado para processar.")
+            return None
+        s_emissao = pd.to_datetime(df['emissao'])
+        df['emissao'] = s_emissao.dt.tz_localize('UTC', ambiguous='infer').dt.tz_convert(FUSO_HORARIO)
+        client.close()
+        return df
+    except Exception as e:
+        print(f"Erro ao conectar ou buscar dados no MongoDB: {e}")
         return None
 
-def extract_filial_code(filename):
-    """Extrai o código da filial do nome do arquivo (ex: faturamento_JF_2025.xlsx -> JF)."""
-    # Procura por códigos conhecidos no nome do arquivo, ignorando maiúsculas/minúsculas
-    match = re.search(r'(SS|SZM|JF|VA|RJ)', filename, re.IGNORECASE)
-    if match:
-        return match.group(0).upper()
-    print(f"Aviso: Não foi possível extrair o código da filial do arquivo '{filename}'.")
-    return None
+def create_bar_chart(data, title, filename):
+    if data.empty or data.sum() == 0:
+        fig, ax = plt.subplots(figsize=(10, 2))
+        ax.text(0.5, 0.5, 'Sem dados para o período', ha='center', va='center')
+        ax.set_xticks([]); ax.set_yticks([])
+    else:
+        data = data.reindex(FILIAIS_ORDEM, fill_value=0)
+        fig, ax = plt.subplots(figsize=(10, 2))
+        bars = ax.barh(data.index, data.values, color=CORES_GRAFICOS_EVOLUCAO)
+        ax.set_xlabel('Valor Faturado (R$)')
+        ax.set_title(title, loc='left', color=[c/255 for c in COR_SECUNDARIA], fontsize=10)
+        ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('R$ {x:,.2f}'))
+        ax.set_xlim(left=0)
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        for bar in bars:
+            width = bar.get_width()
+            if width > 0:
+                ax.text(width * 1.01, bar.get_y() + bar.get_height()/2, f'R$ {width:,.2f}', va='center', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
 
-def process_file(filepath, db):
-    """Lê um arquivo Excel, transforma os dados e os carrega no MongoDB."""
-    filename = os.path.basename(filepath)
-    print(f"\n--- Processando arquivo: {filename} ---")
+def create_line_chart(data_dict, title, filename, is_multiple_lines=False):
+    """
+    Cria um gráfico de linhas (geral ou múltiplas linhas para filiais)
+    e o salva como imagem, com rótulos de valores nos pontos.
+    """
+    fig, ax = plt.subplots(figsize=(10, 4))
 
-    filial_original = extract_filial_code(filename)
-    if not filial_original:
-        return
+    if is_multiple_lines:
+        # Se for para múltiplas linhas (por filial)
+        if not data_dict:
+             ax.text(0.5, 0.5, 'Dados insuficientes para gerar evolução por filial', ha='center', va='center')
+        else:
+            for i, (label, data) in enumerate(data_dict.items()):
+                if not data.empty:
+                    ax.plot(data.index, data.values, marker='o', label=label, color=CORES_GRAFICOS_EVOLUCAO[i % len(CORES_GRAFICOS_EVOLUCAO)])
+                    # Adiciona rótulos de valores
+                    for x, y in zip(data.index, data.values):
+                        if y > 0: # Evita rótulos para zero ou valores negativos que podem distorcer
+                            ax.text(x, y, f'R$ {y:,.0f}', ha='center', va='bottom', fontsize=7, color='black')
+            ax.legend(loc='upper left', bbox_to_anchor=(1, 1)) # Legenda fora do gráfico
+            plt.subplots_adjust(right=0.75) # Ajusta o layout para acomodar a legenda
+    else:
+        # Se for linha única (geral)
+        data = data_dict # Neste caso, data_dict é o próprio Series do pandas
+        if data.empty:
+            ax.text(0.5, 0.5, 'Dados insuficientes para gerar evolução', ha='center', va='center')
+        else:
+            ax.plot(data.index, data.values, marker='o', color=f"#{COR_PRINCIPAL[0]:02x}{COR_PRINCIPAL[1]:02x}{COR_PRINCIPAL[2]:02x}")
+            # Adiciona rótulos de valores
+            for x, y in zip(data.index, data.values):
+                if y > 0:
+                    ax.text(x, y, f'R$ {y:,.0f}', ha='center', va='bottom', fontsize=7, color='black')
 
-    try:
-        df = pd.read_excel(filepath, engine='openpyxl')
+    ax.set_title(title, loc='left', color=[c/255 for c in COR_SECUNDARIA])
+    ax.set_ylabel('Valor Faturado (R$)')
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('R$ {x:,.0f}'))
+    ax.set_ylim(bottom=0)
+    plt.xticks(rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+# --- CLASSE PARA GERAÇÃO DO PDF (sem alterações significativas no estilo) ---
+
+class PDF(FPDF):
+    def header(self):
+        # self.image('seu_logo.png', 10, 8, 33) # Descomente e adicione seu logo aqui
+        self.set_font('Arial', 'B', 15)
+        self.set_text_color(*COR_PRINCIPAL)
+        self.cell(0, 10, 'Relatório Gerencial de Faturamento', 0, 1, 'C')
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128)
+        self.cell(0, 5, f'Gerado em: {datetime.now(FUSO_HORARIO).strftime("%d/%m/%Y %H:%M:%S")}', 0, 1, 'C')
+        self.ln(5)
+        self.set_draw_color(*COR_PRINCIPAL)
+        self.cell(0, 0, '', 'T', 1)
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128)
+        self.cell(0, 10, f'Página {self.page_no()}/{{nb}}', 0, 0, 'C')
+
+    def create_title(self, title):
+        self.set_font('Arial', 'B', 14)
+        self.set_text_color(*COR_SECUNDARIA)
+        self.cell(0, 10, title, 0, 1, 'L')
+        self.ln(2)
+
+    def create_kpi_box(self, title, value, x, y):
+        self.set_xy(x, y)
+        self.set_font('Arial', 'B', 10)
+        self.set_fill_color(*COR_PRINCIPAL)
+        self.set_text_color(255, 255, 255)
+        self.cell(65, 8, title, 0, 0, 'C', fill=True)
         
-        # --- FASE DE TRANSFORMAÇÃO ---
+        self.set_xy(x, y + 8)
+        self.set_font('Arial', '', 12)
+        self.set_text_color(0, 0, 0)
+        self.set_draw_color(220, 220, 220)
+        formatted_value = f'R$ {value:,.2f}' if isinstance(value, (int, float)) else str(value)
+        self.cell(65, 12, formatted_value, 1, 1, 'C')
+
+    def create_styled_table(self, headers, data, column_widths):
+        self.set_font('Arial', 'B', 9)
+        self.set_fill_color(*COR_PRINCIPAL)
+        self.set_text_color(255, 255, 255)
+        self.set_draw_color(255, 255, 255)
         
-        df.rename(columns={
-            'Numero da nota': 'numero_nota',
-            'empresa': 'EMPRESA', # Ajustado para o nome que usamos no relatório
-            'Pedido do Cliente': 'pedido_cliente',
-            'Numero PV': 'numero_pv',
-            'vendedor': 'vendedor',
-            'Emissão': 'emissao',
-            'CFOP': 'cfop',
-            'Total': 'valor_total_nota'
-        }, inplace=True)
+        for i, header in enumerate(headers):
+            self.cell(column_widths[i], 8, header, 1, 0, 'C', fill=True)
+        self.ln()
 
-        # --- LINHA CORRIGIDA AQUI ---
-        # Converte a coluna para datetime e imediatamente aplica o fuso horário correto.
-        df['emissao'] = pd.to_datetime(df['emissao']).dt.tz_localize(FUSO_HORARIO)
-        
-        filial_mapeada = MAPA_FILIAIS.get(filial_original, {})
-        df['filial_codigo'] = filial_mapeada.get('codigo', filial_original)
-        df['filial_nome'] = filial_mapeada.get('nome', 'Desconhecida')
+        self.set_font('Arial', '', 8)
+        self.set_text_color(0, 0, 0)
+        fill = False
+        for row in data:
+            self.set_fill_color(*COR_FUNDO_LINHA if fill else (255, 255, 255))
+            for i, item in enumerate(row):
+                self.cell(column_widths[i], 7, str(item), 'LR', 0, 'L' if i == 2 else 'C', fill=True)
+            self.ln()
+            fill = not fill
+        self.cell(sum(column_widths), 0, '', 'T')
 
-        df['_id'] = df['numero_nota'].astype(str) + '_' + df['filial_codigo']
-        
-        df['data_carga'] = datetime.now()
-
-        data_to_load = df.to_dict('records')
-        
-        # --- FASE DE CARREGAMENTO ---
-        
-        if not data_to_load:
-            print("Nenhum dado para carregar.")
-            return
-
-        collection = db[COLLECTION_NAME]
-        updates = 0
-        inserts = 0
-
-        for record in data_to_load:
-            result = collection.update_one(
-                {'_id': record['_id']},
-                {'$set': record},
-                upsert=True
-            )
-            if result.upserted_id is not None:
-                inserts += 1
-            elif result.matched_count > 0:
-                updates += 1
-        
-        print(f"Carregamento concluído: {inserts} novas notas inseridas, {updates} notas atualizadas.")
-
-    except Exception as e:
-        print(f"Ocorreu um erro ao processar o arquivo {filename}: {e}")
-
+# --- FUNÇÃO PRINCIPAL ---
 
 def main():
-    """Função principal que orquestra todo o processo de ETL."""
-    db = get_db_connection(MONGO_URI, DB_NAME)
+    print("Iniciando geração do relatório de faturamento estilizado...")
+    df = get_data_from_mongo()
+    if df is None: return
+
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
-    # --- CORREÇÃO AQUI ---
-    # Nós só queremos parar o script se a conexão FALHAR (ou seja, se db for None).
-    if db is None:
-        print("Encerrando o script devido à falha na conexão com o banco de dados.")
-        return
+    hoje = datetime.now(FUSO_HORARIO)
+    inicio_mes_atual = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    fim_mes_anterior = inicio_mes_atual - relativedelta(microseconds=1)
+    inicio_mes_anterior = fim_mes_anterior.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    inicio_ano_atual = hoje.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    df_mes_atual = df[df['emissao'] >= inicio_mes_atual]
+    df_mes_anterior = df[(df['emissao'] >= inicio_mes_anterior) & (df['emissao'] < inicio_mes_atual)]
+    df_ano_atual = df[df['emissao'] >= inicio_ano_atual]
 
-    # Cria a pasta de arquivos processados se ela não existir
-    os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+    pdf = PDF('P', 'mm', 'A4')
+    pdf.alias_nb_pages()
+    
+    # --- PÁGINA 1: DASHBOARD PRINCIPAL ---
+    pdf.add_page()
+    pdf.create_title('Dashboard de Faturamento')
 
-    # Busca por todos os arquivos .xlsx na pasta de entrada
-    files_to_process = glob.glob(os.path.join(INPUT_FOLDER, '*.xlsx'))
+    kpi_mes_atual = df_mes_atual['valor_total_nota'].sum()
+    kpi_mes_anterior = df_mes_anterior['valor_total_nota'].sum()
+    kpi_ano_atual = df_ano_atual['valor_total_nota'].sum()
 
-    if not files_to_process:
-        print("Nenhum arquivo Excel encontrado na pasta 'input'.")
-        return
+    pdf.create_kpi_box('Faturamento Mês Atual', kpi_mes_atual, x=10, y=45)
+    pdf.create_kpi_box('Faturamento Mês Anterior', kpi_mes_anterior, x=78, y=45)
+    pdf.create_kpi_box('Acumulado Ano', kpi_ano_atual, x=146, y=45)
+    pdf.ln(30)
+    
+    print("Gerando gráficos da página 1...")
+    
+    faturamento_filial_mes_atual = df_mes_atual.groupby('filial_nome')['valor_total_nota'].sum()
+    create_bar_chart(faturamento_filial_mes_atual, 'Faturamento por Filial (Mês Atual)', 'chart_p1_1.png')
+    pdf.image('chart_p1_1.png', x=10, w=190)
+    
+    faturamento_filial_mes_anterior = df_mes_anterior.groupby('filial_nome')['valor_total_nota'].sum()
+    create_bar_chart(faturamento_filial_mes_anterior, 'Faturamento por Filial (Mês Anterior)', 'chart_p1_2.png')
+    pdf.image('chart_p1_2.png', x=10, w=190)
+    
+    faturamento_filial_ano = df_ano_atual.groupby('filial_nome')['valor_total_nota'].sum()
+    create_bar_chart(faturamento_filial_ano, 'Faturamento por Filial (Acumulado Ano)', 'chart_p1_3.png')
+    pdf.image('chart_p1_3.png', x=10, w=190)
 
-    for filepath in files_to_process:
-        process_file(filepath, db)
-        # Move o arquivo processado para a pasta 'processed'
-        try:
-            filename = os.path.basename(filepath)
-            os.rename(filepath, os.path.join(PROCESSED_FOLDER, filename))
-            print(f"Arquivo '{filename}' movido para a pasta '{PROCESSED_FOLDER}'.")
-        except Exception as e:
-            print(f"Erro ao mover o arquivo {filename}: {e}")
+    # --- PÁGINA 2: DETALHAMENTO ---
+    pdf.add_page()
+    pdf.create_title('Detalhamento - Últimas Notas Fiscais')
 
-if __name__ == "__main__":
+    for filial in FILIAIS_ORDEM:
+        pdf.set_font('Arial', 'B', 11)
+        pdf.set_text_color(*COR_SECUNDARIA)
+        pdf.cell(0, 10, filial, 0, 1)
+        
+        df_filial = df[df['filial_nome'] == filial].nlargest(10, 'emissao')
+        
+        if df_filial.empty:
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(0, 10, 'Nenhuma nota fiscal encontrada para esta filial.', 0, 1)
+        else:
+            headers = ['Emissão', 'Nota Fiscal', 'Cliente', 'Valor Total']
+            column_widths = [25, 25, 90, 30]
+            table_data = []
+            for _, row in df_filial.iterrows():
+                table_data.append([
+                    row['emissao'].strftime('%d/%m/%Y'),
+                    row['numero_nota'],
+                    str(row['EMPRESA'])[:50],
+                    f"R$ {row['valor_total_nota']:,.2f}"
+                ])
+            pdf.create_styled_table(headers, table_data, column_widths)
+        pdf.ln(5)
+
+    # --- PÁGINA 3: ANÁLISE DE EVOLUÇÃO ---
+    pdf.add_page()
+    pdf.create_title('Análise de Evolução Mensal')
+    
+    # Prepara dados dos últimos 12 meses completos
+    fim_periodo_evolucao = inicio_mes_atual
+    inicio_periodo_evolucao = fim_periodo_evolucao - relativedelta(months=12)
+    df_evolucao = df[(df['emissao'] >= inicio_periodo_evolucao) & (df['emissao'] < fim_periodo_evolucao)]
+    
+    if not df_evolucao.empty:
+        # Gráfico 1: Evolução Geral (com rótulos nos pontos)
+        evolucao_geral = df_evolucao.set_index('emissao').resample('MS')['valor_total_nota'].sum()
+        evolucao_geral.index = evolucao_geral.index.strftime('%b/%Y')
+        print("Gerando gráfico de evolução geral...")
+        create_line_chart(evolucao_geral, 'Faturamento Mensal Geral (Últimos 12 Meses)', 'chart_p3_1.png', is_multiple_lines=False)
+        pdf.image('chart_p3_1.png', x=10, w=190)
+        pdf.ln(5)
+
+        # Gráfico 2: Evolução por Filial (com rótulos nos pontos e múltiplas linhas)
+        print("Gerando gráfico de evolução por filial...")
+        evolucao_por_filial = {}
+        for filial_nome in FILIAIS_ORDEM:
+            df_filial_evolucao = df_evolucao[df_evolucao['filial_nome'] == filial_nome]
+            if not df_filial_evolucao.empty:
+                data_filial = df_filial_evolucao.set_index('emissao').resample('MS')['valor_total_nota'].sum()
+                data_filial.index = data_filial.index.strftime('%b/%Y')
+                evolucao_por_filial[filial_nome] = data_filial
+        
+        create_line_chart(evolucao_por_filial, 'Faturamento Mensal por Filial (Últimos 12 Meses)', 'chart_p3_2.png', is_multiple_lines=True)
+        pdf.image('chart_p3_2.png', x=10, w=190)
+    else:
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 10, 'Dados insuficientes para gerar gráficos de evolução mensal.', 0, 1)
+    
+    # --- Salva o PDF e limpa os arquivos de imagem ---
+    
+    report_filename = f"Relatorio_Faturamento_{hoje.strftime('%Y-%m-%d')}.pdf"
+    full_path = os.path.join(OUTPUT_FOLDER, report_filename)
+    pdf.output(full_path)
+    print(f"Relatório estilizado salvo com sucesso em: {full_path}")
+
+    for file in os.listdir('.'):
+        if file.startswith('chart_') and file.endswith('.png'):
+            os.remove(file)
+    print("Arquivos de imagem temporários removidos.")
+
+
+if __name__ == '__main__':
     main()
