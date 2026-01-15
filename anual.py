@@ -13,29 +13,45 @@ MONGO_URI = "mongodb://localhost:27017/"
 DB_NAME = "faturamento_db"
 COLLECTION_NAME = "notas_fiscais"
 OUTPUT_FOLDER = 'output'
-FILIAIS_ORDEM = ["Juiz de Fora", "Vale Aço"]
+
+# [ADAPTAÇÃO] Removida "Rio de Janeiro" e definida ordem fixa
+FILIAIS_ORDEM = ["Juiz de Fora", "Vale Aço"] 
+
+# [ADAPTAÇÃO] Ano de referência para o relatório anual
+ANO_REFERENCIA = 2025
+
 FUSO_HORARIO = pytz.timezone('America/Sao_Paulo')
 
 # Paleta de Cores
-COR_PRINCIPAL = (0, 63, 92)      # #003f5c em RGB
-COR_SECUNDARIA = (47, 79, 79)    # #2f4f4f em RGB
-COR_FUNDO_LINHA = (240, 240, 240) # Cinza claro para linhas de tabela
-# Expandindo as cores para mais linhas no gráfico de evolução por filial
-CORES_GRAFICOS_EVOLUCAO = ["#003f5c", "#ff6361", "#ffa600", "#7a5195", "#bc5090", "#ef5675"] # Adicionadas mais cores
+COR_PRINCIPAL = (0, 63, 92)
+COR_SECUNDARIA = (47, 79, 79)
+COR_FUNDO_LINHA = (240, 240, 240)
+CORES_GRAFICOS_EVOLUCAO = ["#003f5c", "#ff6361", "#ffa600", "#7a5195", "#bc5090", "#ef5675"]
 
 # --- FUNÇÕES DE BANCO DE DADOS E GRÁFICOS ---
 
 def get_data_from_mongo():
+    """
+    Busca os dados do MongoDB e converte datas.
+    """
     try:
         client = pymongo.MongoClient(MONGO_URI)
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
         df = pd.DataFrame(list(collection.find()))
         if df.empty:
-            print("A coleção no MongoDB está vazia. Nenhum dado para processar.")
+            print("A coleção no MongoDB está vazia.")
             return None
-        s_emissao = pd.to_datetime(df['emissao'])
-        df['emissao'] = s_emissao.dt.tz_localize('UTC', ambiguous='infer').dt.tz_convert(FUSO_HORARIO)
+        
+        # Converte datas para datetime e ajusta fuso
+        df['emissao'] = pd.to_datetime(df['emissao'])
+        
+        # Verifica se já tem timezone, se não tiver, localiza
+        if df['emissao'].dt.tz is None:
+            df['emissao'] = df['emissao'].dt.tz_localize('UTC').dt.tz_convert(FUSO_HORARIO)
+        else:
+            df['emissao'] = df['emissao'].dt.tz_convert(FUSO_HORARIO)
+            
         client.close()
         return df
     except Exception as e:
@@ -48,9 +64,11 @@ def create_bar_chart(data, title, filename):
         ax.text(0.5, 0.5, 'Sem dados para o período', ha='center', va='center')
         ax.set_xticks([]); ax.set_yticks([])
     else:
+        # Garante que apenas as filiais desejadas apareçam e na ordem certa
         data = data.reindex(FILIAIS_ORDEM, fill_value=0)
-        fig, ax = plt.subplots(figsize=(10, 2))
-        bars = ax.barh(data.index, data.values, color=CORES_GRAFICOS_EVOLUCAO)
+        
+        fig, ax = plt.subplots(figsize=(10, 3)) # Aumentei um pouco a altura
+        bars = ax.barh(data.index, data.values, color=CORES_GRAFICOS_EVOLUCAO[:len(FILIAIS_ORDEM)])
         ax.set_xlabel('Valor Faturado (R$)')
         ax.set_title(title, loc='left', color=[c/255 for c in COR_SECUNDARIA], fontsize=10)
         ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('R$ {x:,.2f}'))
@@ -59,63 +77,52 @@ def create_bar_chart(data, title, filename):
         for bar in bars:
             width = bar.get_width()
             if width > 0:
-                ax.text(width * 1.01, bar.get_y() + bar.get_height()/2, f'R$ {width:,.2f}', va='center', fontsize=8)
+                ax.text(width * 1.01, bar.get_y() + bar.get_height()/2, f'R$ {width:,.2f}', va='center', fontsize=9)
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
 def create_line_chart(data_dict, title, filename, is_multiple_lines=False):
-    """
-    Cria um gráfico de linhas (geral ou múltiplas linhas para filiais)
-    e o salva como imagem, com rótulos de valores nos pontos.
-    """
     fig, ax = plt.subplots(figsize=(10, 4))
-
     if is_multiple_lines:
-        # Se for para múltiplas linhas (por filial)
         if not data_dict:
              ax.text(0.5, 0.5, 'Dados insuficientes para gerar evolução por filial', ha='center', va='center')
         else:
             for i, (label, data) in enumerate(data_dict.items()):
                 if not data.empty:
                     ax.plot(data.index, data.values, marker='o', label=label, color=CORES_GRAFICOS_EVOLUCAO[i % len(CORES_GRAFICOS_EVOLUCAO)])
-                    # Adiciona rótulos de valores
                     for x, y in zip(data.index, data.values):
-                        if y > 0: # Evita rótulos para zero ou valores negativos que podem distorcer
+                        if y > 0:
                             ax.text(x, y, f'R$ {y:,.0f}', ha='center', va='bottom', fontsize=7, color='black')
-            ax.legend(loc='upper left', bbox_to_anchor=(1, 1)) # Legenda fora do gráfico
-            plt.subplots_adjust(right=0.75) # Ajusta o layout para acomodar a legenda
+            ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+            plt.subplots_adjust(right=0.75)
     else:
-        # Se for linha única (geral)
-        data = data_dict # Neste caso, data_dict é o próprio Series do pandas
+        data = data_dict
         if data.empty:
             ax.text(0.5, 0.5, 'Dados insuficientes para gerar evolução', ha='center', va='center')
         else:
             ax.plot(data.index, data.values, marker='o', color=f"#{COR_PRINCIPAL[0]:02x}{COR_PRINCIPAL[1]:02x}{COR_PRINCIPAL[2]:02x}")
-            # Adiciona rótulos de valores
             for x, y in zip(data.index, data.values):
                 if y > 0:
                     ax.text(x, y, f'R$ {y:,.0f}', ha='center', va='bottom', fontsize=7, color='black')
-
     ax.set_title(title, loc='left', color=[c/255 for c in COR_SECUNDARIA])
     ax.set_ylabel('Valor Faturado (R$)')
     ax.grid(True, which='both', linestyle='--', linewidth=0.5)
     ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('R$ {x:,.0f}'))
     ax.set_ylim(bottom=0)
     plt.xticks(rotation=45)
-    
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-# --- CLASSE PARA GERAÇÃO DO PDF (sem alterações significativas no estilo) ---
 
+# --- CLASSE PARA GERAÇÃO DO PDF ---
 class PDF(FPDF):
     def header(self):
-        # self.image('seu_logo.png', 10, 8, 33) # Descomente e adicione seu logo aqui
         self.set_font('Arial', 'B', 15)
         self.set_text_color(*COR_PRINCIPAL)
-        self.cell(0, 10, 'Relatório Gerencial de Faturamento', 0, 1, 'C')
+        # [ADAPTAÇÃO] Título alterado para Anual
+        self.cell(0, 10, f'Relatório Anual de Faturamento - {ANO_REFERENCIA}', 0, 1, 'C')
         self.set_font('Arial', 'I', 8)
         self.set_text_color(128)
         self.cell(0, 5, f'Gerado em: {datetime.now(FUSO_HORARIO).strftime("%d/%m/%Y %H:%M:%S")}', 0, 1, 'C')
@@ -171,129 +178,125 @@ class PDF(FPDF):
             fill = not fill
         self.cell(sum(column_widths), 0, '', 'T')
 
+
 # --- FUNÇÃO PRINCIPAL ---
 
 def main():
-    print("Iniciando geração do relatório de faturamento estilizado...")
+    print(f"Iniciando geração do relatório ANUAL de faturamento ({ANO_REFERENCIA})...")
     df = get_data_from_mongo()
     if df is None: return
 
+    # Filtra apenas as filiais desejadas antes de qualquer cálculo
+    df = df[df['filial_nome'].isin(FILIAIS_ORDEM)]
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
-    hoje = datetime.now(FUSO_HORARIO)
-    inicio_mes_atual = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    fim_mes_anterior = inicio_mes_atual - relativedelta(microseconds=1)
-    inicio_mes_anterior = fim_mes_anterior.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    inicio_ano_atual = hoje.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Define o período do ano selecionado
+    inicio_ano = datetime(ANO_REFERENCIA, 1, 1, 0, 0, 0).astimezone(FUSO_HORARIO)
+    fim_ano = datetime(ANO_REFERENCIA, 12, 31, 23, 59, 59).astimezone(FUSO_HORARIO)
     
-    df_mes_atual = df[df['emissao'] >= inicio_mes_atual]
-    df_mes_anterior = df[(df['emissao'] >= inicio_mes_anterior) & (df['emissao'] < inicio_mes_atual)]
-    df_ano_atual = df[df['emissao'] >= inicio_ano_atual]
+    # Filtra os DataFrames
+    df_ano_completo = df[(df['emissao'] >= inicio_ano) & (df['emissao'] <= fim_ano)]
+    
+    # Para comparação, vamos pegar o total do ano anterior também
+    inicio_ano_anterior = inicio_ano - relativedelta(years=1)
+    fim_ano_anterior = fim_ano - relativedelta(years=1)
+    df_ano_anterior = df[(df['emissao'] >= inicio_ano_anterior) & (df['emissao'] <= fim_ano_anterior)]
 
     pdf = PDF('P', 'mm', 'A4')
     pdf.alias_nb_pages()
     
-    # --- PÁGINA 1: DASHBOARD PRINCIPAL ---
+    # --- PÁGINA 1: DASHBOARD ANUAL ---
     pdf.add_page()
-    pdf.create_title('Dashboard de Faturamento')
+    pdf.create_title(f'Dashboard Consolidado - {ANO_REFERENCIA}')
+    
+    total_ano = df_ano_completo['valor_total_nota'].sum()
+    total_ano_anterior = df_ano_anterior['valor_total_nota'].sum()
+    media_mensal = total_ano / 12 if total_ano > 0 else 0
 
-    kpi_mes_atual = df_mes_atual['valor_total_nota'].sum()
-    kpi_mes_anterior = df_mes_anterior['valor_total_nota'].sum()
-    kpi_ano_atual = df_ano_atual['valor_total_nota'].sum()
-
-    pdf.create_kpi_box('Faturamento Mês Atual', kpi_mes_atual, x=10, y=45)
-    pdf.create_kpi_box('Faturamento Mês Anterior', kpi_mes_anterior, x=78, y=45)
-    pdf.create_kpi_box('Acumulado Ano', kpi_ano_atual, x=146, y=45)
+    pdf.create_kpi_box(f'Total Faturado {ANO_REFERENCIA}', total_ano, x=10, y=45)
+    pdf.create_kpi_box(f'Total Faturado {ANO_REFERENCIA - 1}', total_ano_anterior, x=78, y=45)
+    pdf.create_kpi_box('Média Mensal (Est.)', media_mensal, x=146, y=45)
     pdf.ln(30)
     
     print("Gerando gráficos da página 1...")
     
-    faturamento_filial_mes_atual = df_mes_atual.groupby('filial_nome')['valor_total_nota'].sum()
-    create_bar_chart(faturamento_filial_mes_atual, 'Faturamento por Filial (Mês Atual)', 'chart_p1_1.png')
+    # Gráfico 1: Total por filial no ano
+    faturamento_filial_ano = df_ano_completo.groupby('filial_nome')['valor_total_nota'].sum()
+    create_bar_chart(faturamento_filial_ano, f'Faturamento Total por Filial ({ANO_REFERENCIA})', 'chart_p1_1.png')
     pdf.image('chart_p1_1.png', x=10, w=190)
     
-    faturamento_filial_mes_anterior = df_mes_anterior.groupby('filial_nome')['valor_total_nota'].sum()
-    create_bar_chart(faturamento_filial_mes_anterior, 'Faturamento por Filial (Mês Anterior)', 'chart_p1_2.png')
+    # Gráfico 2: Comparativo com Ano Anterior (se houver dados)
+    faturamento_filial_ano_ant = df_ano_anterior.groupby('filial_nome')['valor_total_nota'].sum()
+    create_bar_chart(faturamento_filial_ano_ant, f'Comparativo: Faturamento ({ANO_REFERENCIA - 1})', 'chart_p1_2.png')
     pdf.image('chart_p1_2.png', x=10, w=190)
-    
-    faturamento_filial_ano = df_ano_atual.groupby('filial_nome')['valor_total_nota'].sum()
-    create_bar_chart(faturamento_filial_ano, 'Faturamento por Filial (Acumulado Ano)', 'chart_p1_3.png')
-    pdf.image('chart_p1_3.png', x=10, w=190)
 
-    # --- PÁGINA 2: DETALHAMENTO ---
+    # --- PÁGINA 2: MAIORES VENDAS DO ANO ---
     pdf.add_page()
-    pdf.create_title('Detalhamento - Últimas Notas Fiscais')
-
+    pdf.create_title('Top 10 Notas Fiscais do Ano')
     for filial in FILIAIS_ORDEM:
         pdf.set_font('Arial', 'B', 11)
         pdf.set_text_color(*COR_SECUNDARIA)
         pdf.cell(0, 10, filial, 0, 1)
-        
-        df_filial = df[df['filial_nome'] == filial].nlargest(10, 'emissao')
+        # Filtra top 10 do ano inteiro
+        df_filial = df_ano_completo[df_ano_completo['filial_nome'] == filial].nlargest(10, 'valor_total_nota')
         
         if df_filial.empty:
             pdf.set_font('Arial', '', 10)
-            pdf.cell(0, 10, 'Nenhuma nota fiscal encontrada para esta filial.', 0, 1)
+            pdf.cell(0, 10, 'Nenhuma nota fiscal encontrada para esta filial neste ano.', 0, 1)
         else:
             headers = ['Emissão', 'Nota Fiscal', 'Cliente', 'Valor Total']
             column_widths = [25, 25, 90, 30]
             table_data = []
             for _, row in df_filial.iterrows():
-                table_data.append([
-                    row['emissao'].strftime('%d/%m/%Y'),
-                    row['numero_nota'],
-                    str(row['EMPRESA'])[:50],
-                    f"R$ {row['valor_total_nota']:,.2f}"
-                ])
+                table_data.append([row['emissao'].strftime('%d/%m/%Y'), row['numero_nota'], str(row['EMPRESA'])[:50], f"R$ {row['valor_total_nota']:,.2f}"])
             pdf.create_styled_table(headers, table_data, column_widths)
         pdf.ln(5)
 
-    # --- PÁGINA 3: ANÁLISE DE EVOLUÇÃO ---
+    # --- PÁGINA 3: EVOLUÇÃO MENSAL (JANEIRO A DEZEMBRO) ---
     pdf.add_page()
-    pdf.create_title('Análise de Evolução Mensal')
+    pdf.create_title(f'Evolução Mensal - {ANO_REFERENCIA}')
     
-    # Prepara dados dos últimos 12 meses completos
-    fim_periodo_evolucao = inicio_mes_atual
-    inicio_periodo_evolucao = fim_periodo_evolucao - relativedelta(months=12)
-    df_evolucao = df[(df['emissao'] >= inicio_periodo_evolucao) & (df['emissao'] < fim_periodo_evolucao)]
+    # Garante que mostraremos apenas os meses do ano de referência
+    df_evolucao = df_ano_completo.copy()
     
     if not df_evolucao.empty:
-        # Gráfico 1: Evolução Geral (com rótulos nos pontos)
+        # Gráfico 1: Evolução Geral
         evolucao_geral = df_evolucao.set_index('emissao').resample('MS')['valor_total_nota'].sum()
-        evolucao_geral.index = evolucao_geral.index.strftime('%b/%Y')
+        # Formata o índice para mostrar Mês
+        evolucao_geral.index = evolucao_geral.index.strftime('%b')
+        
         print("Gerando gráfico de evolução geral...")
-        create_line_chart(evolucao_geral, 'Faturamento Mensal Geral (Últimos 12 Meses)', 'chart_p3_1.png', is_multiple_lines=False)
+        create_line_chart(evolucao_geral, f'Tendência Mensal Geral ({ANO_REFERENCIA})', 'chart_p3_1.png', is_multiple_lines=False)
         pdf.image('chart_p3_1.png', x=10, w=190)
         pdf.ln(5)
 
-        # Gráfico 2: Evolução por Filial (com rótulos nos pontos e múltiplas linhas)
+        # Gráfico 2: Evolução por Filial
         print("Gerando gráfico de evolução por filial...")
         evolucao_por_filial = {}
         for filial_nome in FILIAIS_ORDEM:
             df_filial_evolucao = df_evolucao[df_evolucao['filial_nome'] == filial_nome]
             if not df_filial_evolucao.empty:
                 data_filial = df_filial_evolucao.set_index('emissao').resample('MS')['valor_total_nota'].sum()
-                data_filial.index = data_filial.index.strftime('%b/%Y')
+                data_filial.index = data_filial.index.strftime('%b')
                 evolucao_por_filial[filial_nome] = data_filial
         
-        create_line_chart(evolucao_por_filial, 'Faturamento Mensal por Filial (Últimos 12 Meses)', 'chart_p3_2.png', is_multiple_lines=True)
-        pdf.image('chart_p3_2.png', x=10, w=190)
+        if evolucao_por_filial:
+            create_line_chart(evolucao_por_filial, f'Performance Mensal por Filial ({ANO_REFERENCIA})', 'chart_p3_2.png', is_multiple_lines=True)
+            pdf.image('chart_p3_2.png', x=10, w=190)
     else:
         pdf.set_font('Arial', '', 10)
-        pdf.cell(0, 10, 'Dados insuficientes para gerar gráficos de evolução mensal.', 0, 1)
+        pdf.cell(0, 10, f'Não há dados suficientes em {ANO_REFERENCIA} para gerar gráficos de evolução.', 0, 1)
     
-    # --- Salva o PDF e limpa os arquivos de imagem ---
-    
-    report_filename = f"Relatorio_Faturamento_{hoje.strftime('%Y-%m-%d')}.pdf"
+    report_filename = f"Relatorio_Anual_Faturamento_{ANO_REFERENCIA}.pdf"
     full_path = os.path.join(OUTPUT_FOLDER, report_filename)
     pdf.output(full_path)
-    print(f"Relatório estilizado salvo com sucesso em: {full_path}")
+    print(f"Relatório final salvo com sucesso em: {full_path}")
 
     for file in os.listdir('.'):
         if file.startswith('chart_') and file.endswith('.png'):
             os.remove(file)
     print("Arquivos de imagem temporários removidos.")
-
 
 if __name__ == '__main__':
     main()
