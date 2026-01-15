@@ -9,7 +9,7 @@ from dateutil.relativedelta import relativedelta
 import pytz
 
 # --- CONFIGURAÇÕES GLOBAIS ---
-MONGO_URI = "mongodb://localhost:27017/"
+MONGO_URI = "mongodb://admin:123@192.168.17.200:27017/?authSource=admin"
 DB_NAME = "faturamento_db"
 COLLECTION_NAME = "notas_fiscais"
 OUTPUT_FOLDER = 'output'

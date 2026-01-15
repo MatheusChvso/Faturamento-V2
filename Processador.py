@@ -9,7 +9,7 @@ import pytz
 
 # --- CONFIGURAÇÕES ---
 # Conexão com o MongoDB
-MONGO_URI = "mongodb://localhost:27017/"
+MONGO_URI = "mongodb://admin:123@192.168.17.200:27017/?authSource=admin"
 DB_NAME = "faturamento_db"
 COLLECTION_NAME = "notas_fiscais"
 FUSO_HORARIO = pytz.timezone('America/Sao_Paulo')   
