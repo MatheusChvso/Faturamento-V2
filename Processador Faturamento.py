@@ -178,6 +178,9 @@ def main():
     df = get_data_from_mongo()
     if df is None: return
 
+
+    df = df[df['filial_nome'].isin(FILIAIS_ORDEM)]
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
     hoje = datetime.now(FUSO_HORARIO)
